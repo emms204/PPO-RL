@@ -1,0 +1,22 @@
+1. The 'train_dqn' and 'train_ppo' files, both runs.
+
+2. AIOP folder contained all the modules needed for training PPO.
+
+3. Folder "FI101_AiPV8969" represents the digital twin model, that have been generated.
+
+4. Folder "LIC01_AiMV4868_dqn_Results" contains results generated from the DQN model.
+
+		In the results, the LIC101_PVAiPV 'orange' line (which is the dqn model output) follows the LIC101_SV_% 'blue line'(which is the set value),
+			and LIC101_MVAiMV 'red line sort of follows the LIC101_MV_% 'purple line'.
+			But, in case of PPO results, it is not doing it. 
+
+5. Folder "Some_Previous_Results_of_PPO_tflite" contains some results generated from the so-called not working PPO model.
+
+6. Folder "PPO_Almost_Okay_Model_&_Results" contains results generated that are almost ok. Result '7675' shows like how the model should perform, but this results doesn't get generated for all of the validation data. And you can see some of the results are bad.
+ 
+7. Now, the 'train_ppo.py' file or 'ppo' module inside the AIOP  folder needs to be looked at. 
+
+	I have tried to implement the 'ppo' to select a continuous action. 
+	But I am unable to get the desired results which is that the predicted model "LIC101_PVAiPV 'orange' line" should follow the LIC101_SV_% 'blue line'(which is the set value)
+		and LIC101_MVAiMV 'red line should go along with the LIC101_MV_% 'purple line'
+
