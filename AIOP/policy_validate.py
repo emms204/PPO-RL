@@ -5,6 +5,17 @@ import random
 import matplotlib.pyplot as plt
 import json
 
+class RewardScaler:
+    def __init__(self):
+        self.min_reward = float('inf')
+        self.max_reward = float('-inf')
+
+    def scale(self, reward):
+        self.min_reward = min(self.min_reward, reward)
+        self.max_reward = max(self.max_reward, reward)
+        if self.max_reward > self.min_reward:
+            return (reward - self.min_reward) / (self.max_reward - self.min_reward)
+        return 0
 #cuDnn bug fix
 #physical_devices = tf.config.list_physical_devices('GPU')
 #tf.config.experimental.set_memory_growth(physical_devices[0], enable=True)
@@ -182,6 +193,16 @@ class Policy_Validate(object):
 
 
 	def get_data(self):
+		"""
+        Get data from a randomly chosen record in the data dictionary.
+
+        This function selects a random record from the data dictionary and reads the corresponding CSV file.
+        It then filters the data based on the time range specified in the record.
+        Finally, The data is converted to a numpy array of float32 type and returned.
+
+        Returns:
+            numpy.ndarray: The filtered and processed data.
+        """
 		record = random.choice(list(self.data_dict.keys()))
 		data = pd.read_csv(self.data_dir + self.data_dict[record]['file']).iloc[::self.execution_scanrate,:]
 		data['TimeStamp'] = pd.to_datetime(data['TimeStamp'])
@@ -195,6 +216,17 @@ class Policy_Validate(object):
 		return data
 	
 	def reset(self):
+		"""
+        Resets the environment for a new episode.
+
+        This function loads the environment, loads data, and generates a new episode.
+        It selects a random data range from the loaded data and adds noise to the SV
+        to start in an odd place. It then appends and clips the data to ensure it
+        doesn't exceed reality. The function returns the start state and a done flag.
+
+        Returns:
+            tuple: A tuple containing the start state (numpy.ndarray) and the done flag (bool).
+        """
 		self.loadEnv()
 		#load data 
 		data_needed = self.episode_length + self.max_lookback
@@ -208,8 +240,12 @@ class Policy_Validate(object):
 		self.episodedata = data[startline:endline]
 
 		#get the first rows as the start state to return
-		start_state = self.episodedata[:self.max_lookback,self.agentIndex]
-
+		start_state = self.episodedata[:self.max_lookback,self.agentIndex+ [self.SVindex]]
+		# Flatten the state to match the expected 1D shape
+		start_state = start_state.flatten()
+		# Ensure the data type matches
+		start_state = start_state.astype(np.float32)
+	
 		#make an empty array to start the episode
 		self.episode_array = np.zeros((self.episodedata.shape),dtype='float32')
 
@@ -223,14 +259,19 @@ class Policy_Validate(object):
 		self.done = False
 
 		#create a variable to show where in the agent_state space the controller positioin is
-		self.MVpos = self.agentIndex.index(self.MVindex)
+		# self.MVpos = self.agentIndex.index(self.MVindex)
 
 		return start_state,self.done
 
 	def step(self,action):
 
+		# Apply action to the episode array
+        # Ensure action is a numpy array and in the correct shape
+		action = np.array(action).flatten()
+
+
 		#copy episode data to the episode array
-		self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
+		# self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
 		#overwrite the MV with the agents action in the episode data into the future
 		self.episode_array[self.transition_count,self.MVindex] = action
 		if self.dt1 is not None:
@@ -318,8 +359,10 @@ class Policy_Validate(object):
 			self.physics_pv()
 
 		#get the new state to return
-		state_ = self.episode_array[self.transition_count-self.max_lookback+1:self.transition_count+1,self.agentIndex]
-		
+		state_ = self.episode_array[self.transition_count-self.max_lookback+1:self.transition_count+1,self.agentIndex + [self.SVindex]]
+		state_ = state_.flatten()
+		state_ = state_.astype(np.float32)
+	
 		#check if done
 		if self.transition_count > self.episode_length + self.max_lookback-2:
 			self.done = True

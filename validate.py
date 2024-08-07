@@ -1,7 +1,9 @@
 import json
 import tensorflow as tf
+from functools import partial
 from tensorflow.keras.models import load_model
-from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Lambda, Flatten 
 from tensorflow.keras.optimizers import Adam
 import tensorflow_probability as tfp
 from AIOP.policy_validate import Policy_Validate
@@ -22,16 +24,30 @@ DT5 = None
 MODEL_DIR = 'LIC01_AiMVtemp/'
 MODEL_NAME = 'LIC01_AiMV_actor.keras'
 
-# Define the compute_covariance function
-def compute_covariance(log_sigma, log_std_min=-20.0, log_std_max=1.0):
-    covar = tf.exp(
-        log_std_min + 0.5 * (log_std_max - log_std_min) * (log_sigma + 1)
-    ) ** 2
-    covar_matrix = tf.linalg.diag(covar)
-    return covar_matrix
+# log_std_min = -20.0
+# log_std_max = 2.0
+def build_actor(input_dims, log_std_min=-20.0, log_std_max=2.0):
+    inputs = Input(shape=(1, agent_lookback * input_dims))
+    # inputs = Input(shape=(self.agent_lookback, input_dims))
+    x = Dense(128, activation='relu')(inputs)
+    x = Flatten()(x)
+    x = Dense(64, activation='relu')(x)  
+    x = Dense(32, activation='relu')(x)
+
+    mu = Dense(1, activation='sigmoid')(x)  # Changed to sigmoid for [0, 1] bound
+    log_std = Dense(1, activation=None)(x)
+
+    log_std_clipped = Lambda(lambda x: tf.clip_by_value(x, log_std_min, log_std_max))(log_std)
+
+    actor = Model(inputs, outputs=[mu, log_std_clipped])
+    return actor
+# custom_clip = partial(tf.clip_by_value, clip_value_min=log_std_min, clip_value_max=log_std_max)
+
+
+# model = load_model(MODEL_DIR + MODEL_NAME, custom_objects={'Lambda': custom_clip}, safe_mode=False)
 
 # Load the model
-model = load_model(MODEL_DIR + MODEL_NAME,  custom_objects={'compute_covariance': compute_covariance})
+# model = load_model(MODEL_DIR + MODEL_NAME, custom_objects={'Lambda': lambda x: tf.clip_by_value(x, log_std_min, log_std_max)}, compile=False)
 # custom_objects = {'ppo_loss': PPOAgent.ppo_loss}  # Include any custom loss or metrics functions here
 
 # Pull info from the controller config file
@@ -48,6 +64,9 @@ execution_scanrate = config['execution_scanrate']
 physics = config['physics']
 print(agent_lookback, training_scanrate, execution_scanrate, physics)
 EPISODE_LENGTH = 200
+
+actor = build_actor(len(agentIndex)+1)  # Recreate the architecture
+actor.load_weights(MODEL_DIR + MODEL_NAME)
 
 # Import Validation Tool
 val = Policy_Validate(data_dir=DATA_DIR, agentIndex=agentIndex, MVindex=MVindex,
@@ -66,14 +85,10 @@ for ep in range(4):
         state = state[np.newaxis, :] 
         state = state[::int(training_scanrate / execution_scanrate)].astype('float32')
         # Select the last n samples
-        state = state[-agent_lookback:].reshape(1, agent_lookback, len(agentIndex))
+        state = state[-agent_lookback:].reshape(1, 1, -1)
         # Run model
-        mu, covar = model.predict(state, verbose=0)
-        action_dist = tfp.distributions.MultivariateNormalFullCovariance (loc=mu, covariance_matrix=covar)
-        # Sample an action from the distribution
-        action = action_dist.sample()
-        mean_action = tf.reduce_mean(action, axis=[1, 2])
-        control = mean_action
+        mu, covar = actor.predict(state, verbose=0)
+        control = mu
         # print("model output: ", control)
         # Advance environment with policy action
         state_, done = val.step(control)
