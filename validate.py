@@ -26,21 +26,24 @@ MODEL_NAME = 'LIC01_AiMV_actor.keras'
 
 # log_std_min = -20.0
 # log_std_max = 2.0
-def build_actor(input_dims, log_std_min=-20.0, log_std_max=2.0):
-    inputs = Input(shape=(1, agent_lookback * input_dims))
-    # inputs = Input(shape=(self.agent_lookback, input_dims))
-    x = Dense(128, activation='relu')(inputs)
-    x = Flatten()(x)
-    x = Dense(64, activation='relu')(x)  
-    x = Dense(32, activation='relu')(x)
-
-    mu = Dense(1, activation='sigmoid')(x)  # Changed to sigmoid for [0, 1] bound
-    log_std = Dense(1, activation=None)(x)
-
-    log_std_clipped = Lambda(lambda x: tf.clip_by_value(x, log_std_min, log_std_max))(log_std)
-
-    actor = Model(inputs, outputs=[mu, log_std_clipped])
-    return actor
+class ActorNetwork(tf.keras.Model):
+    def __init__(self, action_dim, hidden_dim):
+        super().__init__()
+        self.flatten = Flatten()
+        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.mean_layer = tf.keras.layers.Dense(action_dim, activation='sigmoid')
+        self.log_std = tf.Variable(tf.zeros(action_dim), trainable=True)
+    
+    def call(self, x):
+        x = self.flatten(x)
+        x = self.fc1(x)
+        x = self.fc2(x)
+        mean = self.mean_layer(x)
+        log_std = tf.clip_by_value(self.log_std, -20, 2)
+        log_std = tf.broadcast_to(log_std, tf.shape(mean))
+        return mean, log_std
+    
 # custom_clip = partial(tf.clip_by_value, clip_value_min=log_std_min, clip_value_max=log_std_max)
 
 
@@ -65,7 +68,7 @@ physics = config['physics']
 print(agent_lookback, training_scanrate, execution_scanrate, physics)
 EPISODE_LENGTH = 200
 
-actor = build_actor(len(agentIndex)+1)  # Recreate the architecture
+actor = ActorNetwork(action_dim=1, hidden_dim=128)  # Recreate the architecture
 actor.load_weights(MODEL_DIR + MODEL_NAME)
 
 # Import Validation Tool
@@ -78,22 +81,23 @@ val = Policy_Validate(data_dir=DATA_DIR, agentIndex=agentIndex, MVindex=MVindex,
 for ep in range(4):
     # Initialize validation loop
     state, done = val.reset()
-    print(state[0])
     # Execute the episode
-    while not done:
+    for i in range(0, EPISODE_LENGTH):
         # Change controller with max action
         state = state[np.newaxis, :] 
         state = state[::int(training_scanrate / execution_scanrate)].astype('float32')
         # Select the last n samples
         state = state[-agent_lookback:].reshape(1, 1, -1)
         # Run model
-        mu, covar = actor.predict(state, verbose=0)
+        mu, std = actor.predict(state, verbose=0)
         control = mu
         # print("model output: ", control)
         # Advance environment with policy action
-        state_, done = val.step(control)
+        state_, reward, done, info = val.step(control)
         
         # Advance state
         state = state_
+
+        if done: break
 
     val.plot_eps(MODEL_DIR)

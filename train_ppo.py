@@ -234,3 +234,4 @@ for episode in tqdm(range(0, NUM_EPISODES)):
 plt.figure(figsize=(20, 5))
 plt.plot(train_performance["rewards"][1:])
 plt.scatter(best_rewards["episodes"][1:], best_rewards["rewards"][1:], c="orange")
+plt.show()

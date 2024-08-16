@@ -5,20 +5,7 @@ import random
 import matplotlib.pyplot as plt
 import json
 
-class RewardScaler:
-    def __init__(self):
-        self.min_reward = float('inf')
-        self.max_reward = float('-inf')
 
-    def scale(self, reward):
-        self.min_reward = min(self.min_reward, reward)
-        self.max_reward = max(self.max_reward, reward)
-        if self.max_reward > self.min_reward:
-            return (reward - self.min_reward) / (self.max_reward - self.min_reward)
-        return 0
-#cuDnn bug fix
-#physical_devices = tf.config.list_physical_devices('GPU')
-#tf.config.experimental.set_memory_growth(physical_devices[0], enable=True)
 
 class Policy_Validate(object):
 	def __init__(self,data_dir,agentIndex,MVindex,SVindex,PVindex,
@@ -46,6 +33,22 @@ class Policy_Validate(object):
 		self.training_scanrate = training_scanrate
 		self.physics = False
 		self.get_tagnames()
+
+		self.general = 1                # proportional to error signal
+		self.stability = 0.1            # for stability near setpoint
+		self.stability_tolerance = 0.003 # within this tolerance
+		self.response = 0.5             # for reaching the setpoint quickly
+		self.response_tolerance = 0.05  # within this tolerance
+		self.mv_change_penalty = 0.1    # penalty for large MV changes
+		self.error_improvement_reward = 0.2 # reward for improving error over time
+
+		# Termination condition parameters
+		self.success_tolerance = 0.05   # Tolerance for considering the control successful
+		self.success_duration = 50      # Number of consecutive steps within tolerance for success
+		self.failure_threshold = 0.5    # Error threshold for immediate failure
+		self.max_no_improvement_steps = 200  # Max steps without significant improvement
+		self.mv_lower_limit = 0.0       # Lower limit for MV
+		self.mv_upper_limit = 1.0       # Upper limit for MV
 
 
 	def get_tagnames(self):
@@ -228,6 +231,12 @@ class Policy_Validate(object):
             tuple: A tuple containing the start state (numpy.ndarray) and the done flag (bool).
         """
 		self.loadEnv()
+
+		# State variables for termination conditions
+		self.steps_within_tolerance = 0
+		self.steps_since_improvement = 0
+		self.best_error = float('inf')
+	
 		#load data 
 		data_needed = self.episode_length + self.max_lookback
 		data = self.get_data()
@@ -240,10 +249,7 @@ class Policy_Validate(object):
 		self.episodedata = data[startline:endline]
 
 		#get the first rows as the start state to return
-		start_state = self.episodedata[:self.max_lookback,self.agentIndex+ [self.SVindex]]
-		# Flatten the state to match the expected 1D shape
-		start_state = start_state.flatten()
-		# Ensure the data type matches
+		start_state = self.episodedata[:self.max_lookback,self.agentIndex]
 		start_state = start_state.astype(np.float32)
 	
 		#make an empty array to start the episode
@@ -263,11 +269,49 @@ class Policy_Validate(object):
 
 		return start_state,self.done
 
+	def calculate_reward(self, setpoint, current_flow_rate, current_mv, previous_mv, previous_error):
+		error = setpoint - current_flow_rate
+		
+		# Base reward inversely proportional to error
+		base_reward = -abs(error) * self.general
+		
+		# Stability reward (penalize large MV changes)
+		mv_change = abs(current_mv - previous_mv)
+		stability_reward = -mv_change * self.stability
+		
+		# Bonus for being close to setpoint
+		setpoint_bonus = 0
+		if abs(error) < self.response_tolerance:
+			setpoint_bonus = self.response
+		elif abs(error) < 2 * self.response_tolerance:
+			setpoint_bonus = 0.5 * self.response
+		
+		# Reward for error improvement over time
+		error_improvement = previous_error - abs(error)
+		error_improvement_reward = max(0, error_improvement * self.error_improvement_reward)
+		
+		# Reward for "good" MV choices
+		# Assuming a good MV is one that's proportional to the error
+		# This encourages the agent to make larger adjustments when far from setpoint,
+		# and smaller adjustments when close to setpoint
+		mv_choice_reward = min(1, abs(error) / self.response_tolerance) * abs(current_mv - previous_mv)
+		
+		# Combine rewards
+		total_reward = (
+			base_reward + 
+			stability_reward + 
+			setpoint_bonus + 
+			error_improvement_reward +
+			mv_choice_reward
+		)
+		
+		return total_reward
+
 	def step(self,action):
 
 		# Apply action to the episode array
         # Ensure action is a numpy array and in the correct shape
-		action = np.array(action).flatten()
+		action = np.array(action)
 
 
 		#copy episode data to the episode array
@@ -359,18 +403,69 @@ class Policy_Validate(object):
 			self.physics_pv()
 
 		#get the new state to return
-		state_ = self.episode_array[self.transition_count-self.max_lookback+1:self.transition_count+1,self.agentIndex + [self.SVindex]]
-		state_ = state_.flatten()
+		state_ = self.episode_array[self.transition_count-self.max_lookback+1:self.transition_count+1,self.agentIndex]
 		state_ = state_.astype(np.float32)
-	
-		#check if done
-		if self.transition_count > self.episode_length + self.max_lookback-2:
-			self.done = True
 
-		#adVance counter
-		self.transition_count +=1
+		setpoint = self.episode_array[self.transition_count, self.SVindex]
+		current_flow_rate = self.episode_array[self.transition_count, self.dt1_dependantVar]
+		current_mv = self.episode_array[self.transition_count, self.MVindex]
+		# Calculate reward
+		previous_mv = self.episode_array[self.transition_count - 1, self.MVindex]
 		
-		return state_,self.done
+		# Calculate previous error
+		previous_flow_rate = self.episode_array[self.transition_count - 1, self.dt1_dependantVar]
+		previous_error = abs(setpoint - previous_flow_rate)
+
+		error = abs(setpoint - current_flow_rate)
+		
+		# Check termination conditions
+		done = False
+		termination_reason = None
+
+		# 1. Success condition
+		if error <= self.success_tolerance:
+			self.steps_within_tolerance += 1
+			if self.steps_within_tolerance >= self.success_duration:
+				done = True
+				termination_reason = "Success: Maintained within tolerance"
+		else:
+			self.steps_within_tolerance = 0
+
+		# # 2. Failure conditions
+		# if error > self.failure_threshold:
+		#     done = True
+		#     termination_reason = "Failure: Error exceeded critical threshold"
+		
+		if error < self.best_error:
+			self.best_error = error
+			self.steps_since_improvement = 0
+		else:
+			self.steps_since_improvement += 1
+			if self.steps_since_improvement >= self.max_no_improvement_steps:
+				done = True
+				termination_reason = "Failure: No improvement for too long"
+
+		# 3. Safety condition
+		if current_mv < self.mv_lower_limit or current_mv > self.mv_upper_limit:
+			done = True
+			termination_reason = "Safety: MV out of operational limits"
+
+		# 4. Time limit
+		if self.transition_count >= self.episode_length:
+			done = True
+			termination_reason = "Time limit reached"
+
+		raw_reward = self.calculate_reward(setpoint, current_flow_rate, current_mv, previous_mv, previous_error)
+		#adVance counter
+		self.transition_count +=1 
+		# Prepare info dict
+		info = {
+			"termination_reason": termination_reason,
+			"error": error,
+			"steps_within_tolerance": self.steps_within_tolerance
+		}
+
+		return state_, raw_reward, done, info
 		
 
 	def plot_eps(self,model_dir):
