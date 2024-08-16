@@ -225,7 +225,7 @@ for episode in tqdm(range(0, NUM_EPISODES)):
         best_rewards["rewards"].append(best_reward)
         agent.save_policy(MODEL_DIR + CONTROLLER_NAME)
 
-    if episode % 10 == 0:
+    if (episode + 1) % 10 == 0:
         buff.saveEpisodes(MODEL_DIR + 'replaybuffer.csv')
         plt.figure(figsize=(20, 5))
         plt.plot(train_performance["rewards"][1:])
