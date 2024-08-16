@@ -7,7 +7,7 @@ from tensorflow.keras.layers import Input, Dense, Lambda, Flatten
 from tensorflow.keras.optimizers import Adam
 import tensorflow_probability as tfp
 from AIOP.policy_validate import Policy_Validate
-from AIOP.ppo import PPOAgent
+from AIOP.ppo import PPOAgent, ActorNetwork
 import numpy as np
 # Data directory
 DATA_DIR= './data/norm_data/'
@@ -26,23 +26,6 @@ MODEL_NAME = 'LIC01_AiMV_actor.keras'
 
 # log_std_min = -20.0
 # log_std_max = 2.0
-class ActorNetwork(tf.keras.Model):
-    def __init__(self, action_dim, hidden_dim):
-        super().__init__()
-        self.flatten = Flatten()
-        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.mean_layer = tf.keras.layers.Dense(action_dim)
-        self.log_std = tf.Variable(tf.zeros(action_dim), trainable=True)
-    
-    def call(self, x):
-        x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.fc2(x)
-        mean = self.mean_layer(x)
-        log_std = tf.clip_by_value(self.log_std, -20, 2)
-        log_std = tf.broadcast_to(log_std, tf.shape(mean))
-        return mean, log_std
     
 # custom_clip = partial(tf.clip_by_value, clip_value_min=log_std_min, clip_value_max=log_std_max)
 
