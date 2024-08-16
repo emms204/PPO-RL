@@ -438,6 +438,8 @@ class Simulator(object):
         # Apply action to the episode array
         # Ensure action is a numpy array and in the correct shape
         action = np.array(action)
+        #copy episode data to the episode array
+        self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
         self.episode_array[self.transition_count,self.MVindex] = action
 
         # Predict the PVs if required
