@@ -87,9 +87,9 @@ class ActorNetwork(tf.keras.Model):
     def __init__(self, action_dim, hidden_dim):
         super().__init__()
         self.flatten = Flatten()
-        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.mean_layer = tf.keras.layers.Dense(action_dim)
+        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='tanh')
+        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='tanh')
+        self.mean_layer = tf.keras.layers.Dense(action_dim, activation='tanh')
         self.log_std = tf.Variable(tf.zeros(action_dim), trainable=True)
     
     def call(self, x):
@@ -105,8 +105,8 @@ class ValueNetwork(tf.keras.Model):
     def __init__(self, hidden_dim):
         super().__init__()
         self.flatten = Flatten()
-        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='tanh')
+        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='tanh')
         self.fc3 = tf.keras.layers.Dense(1)
     
     def call(self, x):

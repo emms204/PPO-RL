@@ -315,7 +315,7 @@ class Policy_Validate(object):
 
 
 		#copy episode data to the episode array
-		# self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
+		self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
 		#overwrite the MV with the agents action in the episode data into the future
 		self.episode_array[self.transition_count,self.MVindex] = action
 		if self.dt1 is not None:
