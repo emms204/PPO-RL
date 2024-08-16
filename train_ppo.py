@@ -214,7 +214,7 @@ for episode in tqdm(range(0, NUM_EPISODES)):
                        data["dones"], data["states"][1:], data["log_probs"])
 
     act_loss, crit_loss = agent.ppo_update(data["states"], data["actions"],
-                                           data["log_probs"], data["returns"], data["gaes"], epochs=25)
+                                           data["log_probs"], data["returns"], data["gaes"], epochs=50)
 
     train_performance["rewards"].append(episode_reward)
 
