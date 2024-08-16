@@ -227,6 +227,10 @@ for episode in tqdm(range(0, NUM_EPISODES)):
 
     if episode % 10 == 0:
         buff.saveEpisodes(MODEL_DIR + 'replaybuffer.csv')
+        plt.figure(figsize=(20, 5))
+        plt.plot(train_performance["rewards"][1:])
+        plt.scatter(best_rewards["episodes"][1:], best_rewards["rewards"][1:], c="orange")
+        plt.show()
 
     print(f'best total reward for episode {episode+1}: {episode_reward:.3f}, Actor Loss: {act_loss:.3f}, Critic Loss: {crit_loss:.3f}')
 
