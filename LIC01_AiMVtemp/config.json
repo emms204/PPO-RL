@@ -3,6 +3,8 @@
         "dependantVar": 3,
         "independantVars": [
             1,
+            2,
+            3,
             5,
             6,
             7
@@ -20,7 +22,7 @@
     "entropy_coef": 0.01,
     "critic_coef": 0.5,
     "svNoise": 0.05,
-    "episode_length": 600,
+    "episode_length": 300,
     "max_step": 0.05,
     "rewards": {
         "general": 1,

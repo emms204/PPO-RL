@@ -1,18 +1,5 @@
 import numpy as np
-import tensorflow as tf
-
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-  try:
-    # Currently, memory growth needs to be the same across GPUs
-    for gpu in gpus:
-      tf.config.experimental.set_memory_growth(gpu, True)
-    logical_gpus = tf.config.list_logical_devices('GPU')
-    print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-  except RuntimeError as e:
-    # Memory growth must be set before GPUs have been initialized
-    print(e)
-    
+import tensorflow as tf    
 import tensorflow_probability as tfp
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Lambda, Flatten
@@ -20,10 +7,7 @@ from tensorflow.keras.optimizers import Adam
 import pandas as pd
 from tensorflow.keras import backend as K
 
-tf.debugging.set_log_device_placement(False)
-gpus = tf.config.list_logical_devices('GPU')
-strategy = tf.distribute.MirroredStrategy(gpus)
-print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+# from strategy import strategy
 
 
 class ReplayBuffer:
@@ -98,6 +82,39 @@ class ReplayBuffer:
         buff_std = df.std()
         return buff_min, buff_max, buff_mean, buff_std
 
+
+class ActorNetwork(tf.keras.Model):
+    def __init__(self, action_dim, hidden_dim):
+        super().__init__()
+        self.flatten = Flatten()
+        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.mean_layer = tf.keras.layers.Dense(action_dim, activation='sigmoid')
+        self.log_std = tf.Variable(tf.zeros(action_dim), trainable=True)
+    
+    def call(self, x):
+        x = self.flatten(x)
+        x = self.fc1(x)
+        x = self.fc2(x)
+        mean = self.mean_layer(x)
+        log_std = tf.clip_by_value(self.log_std, -20, 2)
+        log_std = tf.broadcast_to(log_std, tf.shape(mean))
+        return mean, log_std
+
+class ValueNetwork(tf.keras.Model):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.flatten = Flatten()
+        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
+        self.fc3 = tf.keras.layers.Dense(1)
+    
+    def call(self, x):
+        x = self.flatten(x)
+        x = self.fc1(x)
+        x = self.fc2(x)
+        return self.fc3(x)
+
 class PPOAgent:
     def __init__(self, 
                  agent_lookback, 
@@ -142,144 +159,93 @@ class PPOAgent:
         self.actor = None
         self.critic = None
 
-    def build_actor(self, input_dims, log_std_min=-20.0, log_std_max=2.0):
-        inputs = Input(shape=(1, self.agent_lookback * input_dims))
-        # inputs = Input(shape=(self.agent_lookback, input_dims))
-        x = Dense(128, activation='relu')(inputs)
-        x = Flatten()(x)
-        x = Dense(64, activation='relu')(x)  
-        x = Dense(32, activation='relu')(x)
-
-        mu = Dense(1, activation='sigmoid')(x)  # Changed to sigmoid for [0, 1] bound
-        log_std = Dense(1, activation=None)(x)
-
-        log_std_clipped = Lambda(lambda x: tf.clip_by_value(x, log_std_min, log_std_max))(log_std)
-
-        self.actor = Model(inputs, outputs=[mu, log_std_clipped])
+    def build_actor(self, action_dim, hidden_dim):
+        self.actor = ActorNetwork(action_dim, hidden_dim)
         self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
-        print(self.actor.summary())
 
-    def build_critic(self, input_dims):
-        inputs = Input(shape=(1, self.agent_lookback * input_dims))
-        # inputs = Input(shape=(self.agent_lookback, input_dims))
-        x = Dense(128, activation='relu')(inputs)
-        x = Flatten()(x)
-        x = Dense(64, activation='relu')(x)  # Reduced size to match PyTorch architecture
-        x = Dense(32, activation='relu')(x)  # Additional layer
-        outputs = Dense(1, activation='linear')(x)  # Output layer with linear activation for value estimation
-        
-        self.critic = Model(inputs, outputs)
+
+    def build_critic(self, hidden_dim):
+        self.critic = ValueNetwork(hidden_dim)
         self.optimizer_critic = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
-        print(self.critic.summary())
 
     def select_action(self, state):
-        mu, log_std = self.actor.predict(state, verbose=0)
+        state = tf.convert_to_tensor([state], dtype=tf.float32)
+        mean, log_std = self.actor(state)
+        value = self.critic(state)
         std = tf.exp(log_std)
+        dist = tfp.distributions.Normal(mean, std)
+        action = dist.sample()
+        action = tf.clip_by_value(action, 0, 1)
+        return action.numpy()[0], dist.log_prob(action).numpy()[0], value.numpy()[0]
+
+    def discount_reward(self, rewards: np.ndarray, gamma: float=0.99) -> np.ndarray:
+        # n_Σ_(k=t) (r_(t + k) * γ ^ (k))
+        discounted_rewards = []
+        discount_t = 0
+        # Start from the last reward and work backward
+        for r in reversed(rewards):
+            discount_t = discount_t * gamma + r
+            discounted_rewards.insert(0, discount_t)
+        discounted_rewards = np.array(discounted_rewards)
+        return discounted_rewards
+
+
+    def compute_gaes(self,
+            rewards: np.ndarray, 
+            values: np.ndarray, 
+            gamma: float=0.99, 
+            lambda_: float=0.97) -> np.ndarray:
         
-        # Sample from normal distribution
-        normal_dist = tfp.distributions.Normal(mu, std)
-        z = normal_dist.sample()
-        
-        # Squash sample to [0, 1] range
-        action = tf.sigmoid(z)
-        
-        # Compute log probability, accounting for the squashing
-        log_prob = normal_dist.log_prob(z) - tf.math.log(action * (1 - action) + 1e-8)
-        
-        return action, log_prob
-
-    def compute_advantages(self, rewards, dones, values, next_values, normalize=True):
-        """
-        Compute the advantages and returns for the given rewards, dones, values, and next_values.
-        Parameters:
-            rewards (numpy.ndarray): An array of shape (n_steps,) representing the rewards at each time step.
-            dones (numpy.ndarray): An array of shape (n_steps,) representing whether the episode is done at each time step.
-            values (numpy.ndarray): An array of shape (n_steps,) representing the estimated values at each time step.
-            next_values (numpy.ndarray): An array of shape (n_steps,) representing the estimated next values at each time step.
-            normalize (bool, optional): Whether to normalize the advantages. Defaults to True.
-        Returns:
-            advantages (numpy.ndarray): An array of shape (n_steps,) representing the computed advantages.
-            returns (numpy.ndarray): An array of shape (n_steps,) representing the computed returns.
-        """
-        # Calculate deltas
-        deltas = rewards + self.gamma * (1 - dones) * next_values - values
-
-        # Reverse the deltas and dones to use tf.scan from last to first entry
-        reversed_deltas = tf.reverse(deltas, axis=[0])
-        reversed_dones = tf.reverse(dones, axis=[0])
-
-        # Define the scan function for computing advantages
-        def scan_fn(acc, x):
-            delta, done = x
-            return delta + self.gamma * self.lambda_ * (1 - done) * acc
-
-        # Initialize the scan with zeros and apply the scan function
-        advantages = tf.scan(scan_fn, (reversed_deltas, reversed_dones), initializer=0.0)
-        
-        # Reverse the advantages to match the original order
-        advantages = tf.reverse(advantages, axis=[0])
-        returns = advantages + values
-
-        if normalize:
-            advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + 1e-8)
-
-        return advantages, returns
+        values = np.squeeze(values, axis=1)
+        next_values = np.concatenate((values[1:], np.zeros(1)))
+        deltas = rewards + (gamma * next_values) - values
+        gaes = []
+        gae_t = 0
+        # Start from the last reward and work backward
+        for delta in reversed(deltas):
+            gae_t = delta + (gamma * lambda_ * gae_t)
+            gaes.insert(0, gae_t)
+        gaes = np.array(gaes)
+        return gaes    
     
     @tf.function
-    def distributed_learn_step(self, states, rewards, dones, next_states, old_log_probs):
-        
-        values = self.critic(states, training=False)
-        values = tf.squeeze(values, axis=[1])
-        next_values = self.critic(next_states, training=False)
-        next_values = tf.squeeze(next_values, axis=[1])
-
-        advantages, returns = self.compute_advantages(rewards, dones, values, next_values)
-        for _ in range(10):
-            with tf.GradientTape() as tape_actor, tf.GradientTape() as tape_critic:
-                # Actor update
-                mu, log_std = self.actor(states, training=True)
+    def ppo_update(self, states, actions, old_log_probs, returns, advantages, epochs=20):
+        advantages = tf.cast(advantages, dtype=tf.float32)
+        old_log_probs = tf.cast(old_log_probs, dtype=tf.float32)
+        returns = tf.cast(returns, dtype=tf.float32)    
+        for _ in range(epochs):
+            with tf.GradientTape() as tape_policy:
+                mean, log_std = self.actor(states)
                 std = tf.exp(log_std)
+                dist = tfp.distributions.Normal(mean, std)
+                new_log_probs = tf.reduce_sum(dist.log_prob(actions), axis=-1, keepdims=True)
                 
-                # Sample from normal distribution
-                normal_dist = tfp.distributions.Normal(mu, std)
-                z = normal_dist.sample()
-                
-                # Squash sample to [0, 1] range
-                action = tf.sigmoid(z)
-                
-                # Compute log probability, accounting for the squashing
-                log_prob = normal_dist.log_prob(z) - tf.math.log(action * (1 - action) + 1e-8)
-
-                # Calculate the policy ratio
-                policy_ratio = tf.exp(log_prob - old_log_probs)
-                
-                # Clip the policy ratio to the range [1 - epsilon, 1 + epsilon]
-                clipped_policy_ratio = tf.clip_by_value(policy_ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
-                # Compute the policy loss
-                actor_loss = -tf.minimum(policy_ratio * advantages, clipped_policy_ratio * advantages)
-                if self.maximize_entropy:
-                    actor_loss = actor_loss - (self.entropy_coef * normal_dist.entropy())
-                else:
-                    actor_loss = actor_loss + (self.entropy_coef * normal_dist.entropy())
-
-                actor_loss = tf.reduce_mean(actor_loss)
-
-                # Critic update
-                value_pred = self.critic(states, training=True)
-                critic_loss = tf.reduce_mean((returns - value_pred) ** 2)
-
-            # Compute gradients and apply updates
-            grads_actor = tape_actor.gradient(actor_loss, self.actor.trainable_variables)
-            grads_critic = tape_critic.gradient(critic_loss, self.critic.trainable_variables)
+                ratio = tf.exp(new_log_probs - old_log_probs)
+                surr1 = ratio * advantages
+                surr2 = tf.clip_by_value(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
+                actor_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+            
+            grads_actor = tape_policy.gradient(actor_loss, self.actor.trainable_variables)
 
             if self.clip_policy_grads:
                 grads_actor = [tf.clip_by_norm(g, 1.0) for g in grads_actor]
+            
+            self.optimizer_actor.apply_gradients(zip(grads_actor, self.actor.trainable_variables))
+            
+            with tf.GradientTape() as tape_value:
+                value_pred = self.critic(states)
+                value_loss = tf.reduce_mean(tf.square(returns - value_pred))
+            
+            grads_critic = tape_value.gradient(value_loss, self.critic.trainable_variables)
+
             if self.clip_value_grads:
                 grads_critic = [tf.clip_by_norm(g, 1.0) for g in grads_critic]
 
-            self.optimizer_actor.apply_gradients(zip(grads_actor, self.actor.trainable_variables))
             self.optimizer_critic.apply_gradients(zip(grads_critic, self.critic.trainable_variables))
 
+        return actor_loss, value_loss
+        
+            
     
     def save_policy(self, path):
         self.actor.save(path + '_actor.keras')

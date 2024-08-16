@@ -10,11 +10,13 @@ import shutil
 import json
 import logging
 import numpy as np
+import matplotlib.pyplot as plt
 # from silence_tensorflow import silence_tensorflow
 from AIOP.sim_maker import Simulator
 from AIOP.ppo import ReplayBuffer, PPOAgent
 # from AIOP.ppomodified import ReplayBuffer, PPOAgent
 from AIOP.reward import RewardFunction
+from typing import Tuple, Dict
 
 import IPython
 if IPython.get_ipython() is not None:
@@ -22,24 +24,8 @@ if IPython.get_ipython() is not None:
 else:
     from tqdm.notebook import tqdm
 
-import tensorflow as tf
+# from strategy import strategy
 
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-  try:
-    # Currently, memory growth needs to be the same across GPUs
-    for gpu in gpus:
-      tf.config.experimental.set_memory_growth(gpu, True)
-    logical_gpus = tf.config.list_logical_devices('GPU')
-    print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-  except RuntimeError as e:
-    # Memory growth must be set before GPUs have been initialized
-    print(e)
-
-tf.debugging.set_log_device_placement(False)
-gpus = tf.config.list_logical_devices('GPU')
-strategy = tf.distribute.MirroredStrategy(gpus)
-print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
 
 
 #--------------------Parameters for Simulator-------------------------------
@@ -55,11 +41,11 @@ MV_INDEX = 3
 PV_INDEX = 1
 SV_INDEX = 2
 
-AGENT_INDEX = [1,5,6,7]
+AGENT_INDEX = [1,2,3,5,6,7]
 AGENT_LOOKBACK = 5
 
 #about 3-5x as long as the system needs to respond to SP change
-EPISODE_LENGTH = 600
+EPISODE_LENGTH = 300
 #add some noise to the SV to help with simulating responses.
 SV_NOISE = 0.05
 
@@ -100,13 +86,13 @@ buff = ReplayBuffer(AGENT_INDEX, agent_lookback=sim.agent_lookback,
                     capacity=1000000, batch_size=BATCH_SIZE)
 
 # Initialize Agent
-with strategy.scope():
-   agent = PPOAgent(agent_lookback=AGENT_LOOKBACK, gamma=GAMMA, lambda_=LAMBDA, clip_epsilon=CLIP_EPSILON,
-                    entropy_coef=ENTROPY_COEF, critic_coef=CRITIC_COEF,learning_rate=LEARNING_RATE,
-                    maximize_entropy=True, clip_policy_grads=True, clip_value_grads=True)
-   # Build actor and critic networks
-   agent.build_actor(input_dims=len(AGENT_INDEX) + 1)
-   agent.build_critic(input_dims=len(AGENT_INDEX) + 1)
+# with strategy.scope():
+agent = PPOAgent(agent_lookback=AGENT_LOOKBACK, gamma=GAMMA, lambda_=LAMBDA, clip_epsilon=CLIP_EPSILON,
+                entropy_coef=ENTROPY_COEF, critic_coef=CRITIC_COEF,learning_rate=LEARNING_RATE,
+                maximize_entropy=True, clip_policy_grads=True, clip_value_grads=True)
+# Build actor and critic networks
+agent.build_actor(action_dim=1, hidden_dim=128)
+agent.build_critic(hidden_dim=128)
 
 ################################################################################
 #---------------------config file--------------------------------------------
@@ -167,58 +153,84 @@ with open(MODEL_DIR + 'config.json', 'w', encoding='utf-8') as outfile:
 ##############################___PPO___#######################################
 # ---------------------For Episode 1, M do------------------------------------
 ##############################################################################
-NUM_EPISODES = 500
-scores = []
-print("Training Started!")
-pbar = tqdm(range(0, NUM_EPISODES))
-for episode in pbar:
-    score = 0
-    state, done = sim.reset()
-    # control = state[AGENT_LOOKBACK - 1, AGENT_INDEX.index(MV_INDEX)]
-    states, actions, rewards, dones, next_states, log_probs = [], [], [], [], [], []
+def rollout(sim: Simulator, agent: PPOAgent) -> Tuple[Dict[str, np.ndarray], float]:
 
-    while not done:
-        action, log_prob = agent.select_action(state.reshape(1, 1, -1))
-        # print("action selected: ",action, "prob: ", log_prob)
-        control = action
-        # control = np.clip(control, sim.MV_min, sim.MV_max)
-        state_, reward, done = sim.step(control)
-        # reward = reward_function.calculate_reward(state_,control)
-        
-        states.append(state)
-        actions.append(action)
-        rewards.append(reward)
-        dones.append(done)
-        next_states.append(state_)
-        log_probs.append(log_prob)
-        # print("score: ",score)
-        state = state_
-        score += reward
+    experience = {
+        "states": [],
+        "actions": [],
+        "rewards": [],
+        "values": [],
+        "dones": [],
+        "log_probs": [],
+        "reason": []
+    }
 
-    buff.store_episode(states, actions, rewards, dones, next_states, log_probs)
-
-    # Prepare the data for distributed learning
-    states = np.expand_dims(np.array(states, dtype=np.float32), axis=1)
-    rewards = np.array(rewards, dtype=np.float32)
-    dones = np.array(dones, dtype=np.float32)
-    next_states = np.expand_dims(np.array(next_states, dtype=np.float32), axis=1)
-    log_probs = np.array(log_probs, dtype=np.float32)
+    obs, _ = sim.reset()
+    eps_reward = 0
     
-    strategy.run(agent.distributed_learn_step, args=(states, rewards, dones, next_states, log_probs))
+    for _ in range(0, EPISODE_LENGTH):
+        action, log_prob, value = agent.select_action(obs)
+        new_obs, reward, done, info = sim.step(action)
+        
+        experience["states"].append(obs)
+        experience["actions"].append(action)
+        experience["rewards"].append(reward)
+        experience["values"].append(value)
+        experience["log_probs"].append(log_prob)
+        experience["dones"].append(done)
+        experience["reason"].append(info["termination_reason"])
 
-    scores.append(score)
-    # agent.learn()
-    # scores.append(score)
+        eps_reward += reward
+        obs = new_obs
 
-    if episode > 25:
-        moving_average = np.mean(scores[-25:])
-    else:
-        moving_average = 0
+        if done: break
+
+    experience = {k:np.array(v) for k, v in experience.items()}
+    return experience, eps_reward
+
+NUM_EPISODES = 500
+normalize_returns = False
+normalize_gaes = False
+
+train_performance = {'rewards':[]}
+best_rewards = {'episodes': [],'rewards': []}
+
+best_reward = -np.inf
+for episode in tqdm(range(0, NUM_EPISODES)):
+    data, episode_reward = rollout(sim, agent)
+    # for k, v in data.items():
+    #    print(k, v.shape)
+
+    data["returns"] = agent.discount_reward(data["rewards"], GAMMA)
+    data["gaes"] = agent.compute_gaes(data["rewards"], data["values"], GAMMA, LAMBDA)
+
+    if normalize_returns:
+        data["returns"] = (data["returns"] - data["returns"].mean()) / data["returns"].std()
+    
+    if normalize_gaes:
+        data["gaes"] = (data["gaes"] - data["gaes"].mean()) / data["gaes"].std()
+
+    buff.store_episode(data["states"], data["actions"], data["rewards"], 
+                       data["dones"], data["states"][1:], data["log_probs"])
+
+    act_loss, crit_loss = agent.ppo_update(data["states"], data["actions"],
+                                           data["log_probs"], data["returns"], data["gaes"], epochs=5)
+
+    train_performance["rewards"].append(episode_reward)
+
+    if episode_reward > best_reward:
+        best_reward = episode_reward
+        print(f'best total reward for episode {episode+1}: {episode_reward}')
+        best_rewards["episodes"].append(episode)
+        best_rewards["rewards"].append(best_reward)
+        agent.save_policy(MODEL_DIR + CONTROLLER_NAME)
 
     if episode % 10 == 0:
         buff.saveEpisodes(MODEL_DIR + 'replaybuffer.csv')
-        agent.save_policy(MODEL_DIR + CONTROLLER_NAME)
 
-    metrics = {'Episode': (episode + 1)/NUM_EPISODES, 'Score': score, 'Moving Average': f"{moving_average:.2f}"}
-    pbar.set_postfix(metrics)
-    print(f'Episode {episode + 1}/{NUM_EPISODES} - Score: {score}, Moving Average: {moving_average:.2f}')
+    print(f'best total reward for episode {episode+1}: {episode_reward:.3f}, Actor Loss: {act_loss:.3f}, Critic Loss: {crit_loss:.3f}')
+
+
+plt.figure(figsize=(20, 5))
+plt.plot(train_performance["rewards"][1:])
+plt.scatter(best_rewards["episodes"][1:], best_rewards["rewards"][1:], c="orange")
