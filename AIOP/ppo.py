@@ -111,7 +111,7 @@ class ActorNetwork(tf.keras.Model):
         covar = tf.square(std)
         covar = tf.linalg.diag(covar)
         
-        return mu, log_std
+        return mu, covar
 
 class ValueNetwork(tf.keras.Model):
     def __init__(self, hidden_dim):
