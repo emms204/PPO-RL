@@ -107,9 +107,9 @@ class ActorNetwork(tf.keras.Model):
         log_std = self.log_std_layer(x)
         
         log_std = tf.clip_by_value(log_std, self.log_std_min, self.log_std_max)
-        # std = tf.exp(log_std)
-        # covar = tf.square(std)
-        # covar = tf.linalg.diag(covar)
+        std = tf.exp(log_std)
+        covar = tf.square(std)
+        covar = tf.linalg.diag(covar)
         
         return mu, log_std
 
@@ -191,12 +191,12 @@ class PPOAgent:
         state = tf.convert_to_tensor([state], dtype=tf.float32)
         # action_mean = self.actor(state)
         # cov_mat = torch.diag(self.action_var)
-        mean, log_std = self.actor(state)
-        std = tf.exp(log_std)
+        mean, covar = self.actor(state)
+        # std = tf.exp(log_std)
 
         value = self.critic(state)
         # std = tf.exp(self.log_std)
-        dist = tfd.Normal(mean, std)
+        dist = tfd.MultivariateNormalFullCovariance(mean, covar)
         action = dist.sample()
         action = tf.clip_by_value(action, 0, 1)
         return action.numpy()[0], dist.log_prob(action).numpy()[0], value.numpy()[0]
@@ -239,11 +239,11 @@ class PPOAgent:
         actor_l, value_l = [], []
         for i in range(epochs):
             with tf.GradientTape() as tape_policy, tf.GradientTape() as tape_value:
-                mean, log_std = self.actor(states)
+                mean, covar = self.actor(states)
                 values = self.critic(states)
-                std = tf.exp(log_std)
+                # std = tf.exp(log_std)
                 # std = tf.exp(self.log_std)
-                dist = tfd.Normal(mean, std)
+                dist = tfd.MultivariateNormalFullCovariance(mean, covar)
                 new_log_probs = tf.reduce_sum(dist.log_prob(actions), axis=-1, keepdims=True)
                 
                 ratio = tf.exp(new_log_probs - old_log_probs)
