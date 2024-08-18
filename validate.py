@@ -48,7 +48,6 @@ agent_lookback = config['agent_lookback']
 training_scanrate = config['training_scanrate']
 execution_scanrate = config['execution_scanrate']
 physics = config['physics']
-print(agent_lookback, training_scanrate, execution_scanrate, physics)
 EPISODE_LENGTH = 200
 
 actor = ActorNetwork(action_dim=1, hidden_dim=128)  # Recreate the architecture
@@ -72,11 +71,11 @@ for ep in range(4):
         # Select the last n samples
         state = state[-agent_lookback:].reshape(1, 1, -1)
         # Run model
-        mu, std = actor.predict(state, verbose=0)
-        control = mu
+        mu, _ = actor.predict(state, verbose=0)
+        control = tf.clip_by_value(mu, 0, 1)
         # print("model output: ", control)
         # Advance environment with policy action
-        state_, reward, done, info = val.step(control)
+        state_, done = val.step(control)
         
         # Advance state
         state = state_

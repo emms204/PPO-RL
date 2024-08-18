@@ -17,6 +17,7 @@ from AIOP.ppo import ReplayBuffer, PPOAgent
 # from AIOP.ppomodified import ReplayBuffer, PPOAgent
 from AIOP.reward import RewardFunction
 from typing import Tuple, Dict
+import time
 
 import IPython
 if IPython.get_ipython() is not None:
@@ -41,7 +42,8 @@ MV_INDEX = 3
 PV_INDEX = 1
 SV_INDEX = 2
 
-AGENT_INDEX = [1,2,3,5,6,7]
+# AGENT_INDEX = [1,2,3,5,6,7]
+AGENT_INDEX = [3,5,6,7]
 AGENT_LOOKBACK = 5
 
 #about 3-5x as long as the system needs to respond to SP change
@@ -57,7 +59,7 @@ GAMMA = 0.99
 LAMBDA = 0.95
 CLIP_EPSILON = 0.2
 # CLIP_EPSILON = 0.18
-ENTROPY_COEF = 0.01
+ENTROPY_COEF = 0.001
 # ENTROPY_COEF = 0.0
 CRITIC_COEF = 0.5
 LEARNING_RATE = 0.0003
@@ -91,7 +93,7 @@ agent = PPOAgent(agent_lookback=AGENT_LOOKBACK, gamma=GAMMA, lambda_=LAMBDA, cli
                 entropy_coef=ENTROPY_COEF, critic_coef=CRITIC_COEF,learning_rate=LEARNING_RATE,
                 maximize_entropy=True, clip_policy_grads=True, clip_value_grads=True)
 # Build actor and critic networks
-agent.build_actor(action_dim=1, hidden_dim=128)
+agent.build_actor(action_dim=1, hidden_dim=128, action_std=0.5)
 agent.build_critic(hidden_dim=128)
 
 ################################################################################
@@ -197,24 +199,24 @@ best_rewards = {'episodes': [],'rewards': []}
 
 best_reward = -np.inf
 for episode in tqdm(range(0, NUM_EPISODES)):
+    # print(f"sim episode_array {sim.episode_array[sim.transition_count]}, sim episodedata {sim.episodedata[sim.transition_count]}")
     data, episode_reward = rollout(sim, agent)
     # for k, v in data.items():
     #    print(k, v.shape)
-
+    data["states"] = (data["states"] - data["states"].mean()) / (data["states"].std() + 1e-5)
     data["returns"] = agent.discount_reward(data["rewards"], GAMMA)
-    data["gaes"] = agent.compute_gaes(data["rewards"], data["values"], GAMMA, LAMBDA)
-
-    if normalize_returns:
-        data["returns"] = (data["returns"] - data["returns"].mean()) / data["returns"].std()
-    
-    if normalize_gaes:
-        data["gaes"] = (data["gaes"] - data["gaes"].mean()) / data["gaes"].std()
+    # data["returns"] = (data["returns"] - data["returns"].mean()) / (data["returns"].std() + 1e-5)
+    # data["gaes"] = (data["gaes"] - data["gaes"].mean()) / (data["gaes"]) + 1e-8
+    # data["gaes"] = agent.compute_gaes(data["rewards"], data["values"], GAMMA, LAMBDA)
+    data["gaes"] = data["returns"] - np.squeeze(data["values"], axis=1)
+    data["gaes"] = (data["gaes"] - data["gaes"].mean()) / (data["gaes"] + 1e-5)
+    # print(f"Returns: {data["returns"][-10:]}, Gaes: {data["gaes"][-10:]}, Values: {data["values"][-10:]}\n")
 
     buff.store_episode(data["states"], data["actions"], data["rewards"], 
                        data["dones"], data["states"][1:], data["log_probs"])
 
-    act_loss, crit_loss = agent.ppo_update(data["states"], data["actions"],
-                                           data["log_probs"], data["returns"], data["gaes"], epochs=10)
+    act_loss, crit_loss = agent.ppo_update(data["states"], data["actions"], data["log_probs"], data["returns"], 
+                                           data["gaes"], epochs=10)
 
     train_performance["rewards"].append(episode_reward)
 

@@ -15,19 +15,25 @@ class RewardFunction():
         self.response = 1 				#for reaching the setpoint quickly
         self.response_tolerance =.05	#within this tolerance
 
-    def calculate_reward(self, state, action):
+    def calculate_reward(self,state, action):
         '''CALCULATES REWARD GIVEN STATE SPACE'''
-        error = abs(action - state[self.agentIndex.index(self.SVindex)])
-        self.reward = self.general - error * self.general
-
-        for tolerance in [self.response_tolerance, .5 * self.response_tolerance, .25 * self.response_tolerance]:
-            if error < tolerance:
-                self.reward += self.response
-
-        if abs(state[self.agentIndex.index(self.MVindex)] - state[self.agentIndex.index(self.MVindex) - 1]) < self.stability_tolerance and error < self.response_tolerance:
-            self.reward += self.stability
+        # print("PV values in the reward: ", action)
+        # print("SV values in the reward: ", state[-1,self.agentIndex.index(self.SVindex)])
+        error = abs(action - state[-1,self.agentIndex.index(self.SVindex)])
+        self.reward = self.general-error*self.general
 
         if error < self.response_tolerance:
-            self.reward += self.stability
+            self.reward += self.response
+        
+        if error < .5*self.response_tolerance:
+            self.reward += self.response
 
+        if error < .25*self.response_tolerance:
+            self.reward += self.response
+        if abs(state[-1,self.agentIndex.index(self.MVindex)]\
+            -state[-2,self.agentIndex.index(self.MVindex)]) \
+                < self.stability_tolerance and error < self.response_tolerance:
+            self.reward += self.stability
+        if error < self.response_tolerance:
+            self.reward += self.stability
         return self.reward

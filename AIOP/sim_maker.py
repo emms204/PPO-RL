@@ -7,6 +7,7 @@ import numpy as np
 import tensorflow as tf
 import pandas as pd 
 import gym
+from AIOP.reward import RewardFunction
 
 
 # silence tf warnings
@@ -60,19 +61,21 @@ class Simulator(object):
         self.training_scanrate = training_scanrate
         self.physics = False
 
+        # self.rewardfunction = RewardFunction(self.agentIndex, self.MVindex, self.SVindex, 1)
+
         self.general = 1                # proportional to error signal
-        self.stability = 0.1            # for stability near setpoint
+        self.stability = 1            # for stability near setpoint
         self.stability_tolerance = 0.003 # within this tolerance
-        self.response = 0.5             # for reaching the setpoint quickly
-        self.response_tolerance = 0.05  # within this tolerance
+        self.response = 1           # for reaching the setpoint quickly
+        self.response_tolerance = 0.2  # within this tolerance
         self.mv_change_penalty = 0.1    # penalty for large MV changes
-        self.error_improvement_reward = 0.2 # reward for improving error over time
+        self.error_improvement_reward = 1 # reward for improving error over time
 
         # Termination condition parameters
-        self.success_tolerance = 0.05   # Tolerance for considering the control successful
+        self.success_tolerance = 0.2   # Tolerance for considering the control successful
         self.success_duration = 50      # Number of consecutive steps within tolerance for success
         self.failure_threshold = 0.5    # Error threshold for immediate failure
-        self.max_no_improvement_steps = 200  # Max steps without significant improvement
+        self.max_no_improvement_steps = 150  # Max steps without significant improvement
         self.mv_lower_limit = 0.0       # Lower limit for MV
         self.mv_upper_limit = 1.0       # Upper limit for MV
 
@@ -372,6 +375,9 @@ class Simulator(object):
         # Add noise to SV to start in an odd place
         noise = np.random.choice([-1, 1]) * self.SVnoise * np.random.rand()
         self.episodedata[:, self.SVindex] += noise
+        for row in range(self.max_lookback,data_needed):
+            #append and clip data to make sure it doesnt exceed reality
+            self.episodedata[row,self.SVindex] = np.clip(self.episodedata[row,self.SVindex]+noise,self.SV_min,self.SV_max)
 
         # Get the first rows as the start state to return
         start_state = self.episodedata[self.max_lookback - self.agent_lookback:self.max_lookback, self.agentIndex]
@@ -391,11 +397,11 @@ class Simulator(object):
         error = setpoint - current_flow_rate
         
         # Base reward inversely proportional to error
-        base_reward = -abs(error) * self.general
+        # base_reward = self.general-abs(error)*self.general
         
         # Stability reward (penalize large MV changes)
-        mv_change = abs(current_mv - previous_mv)
-        stability_reward = -mv_change * self.stability
+        # mv_change = abs(current_mv - previous_mv)
+        # stability_reward = -mv_change * self.stability
         
         # Bonus for being close to setpoint
         setpoint_bonus = 0
@@ -405,25 +411,25 @@ class Simulator(object):
             setpoint_bonus = 0.5 * self.response
         
         # Reward for error improvement over time
-        error_improvement = previous_error - abs(error)
-        error_improvement_reward = max(0, error_improvement * self.error_improvement_reward)
+        # error_improvement = previous_error - abs(error)
+        # error_improvement_reward = max(0, error_improvement * self.error_improvement_reward)
         
         # Reward for "good" MV choices
         # Assuming a good MV is one that's proportional to the error
         # This encourages the agent to make larger adjustments when far from setpoint,
         # and smaller adjustments when close to setpoint
-        mv_choice_reward = min(1, abs(error) / self.response_tolerance) * abs(current_mv - previous_mv)
+        # mv_choice_reward = min(1, abs(error) / self.response_tolerance) * abs(current_mv - previous_mv)
         
-        # Combine rewards
-        total_reward = (
-            base_reward + 
-            stability_reward + 
-            setpoint_bonus + 
-            error_improvement_reward +
-            mv_choice_reward
-        )
+        # # Combine rewards
+        # total_reward = (
+        #     base_reward + 
+        #     # stability_reward + 
+        #     setpoint_bonus + 
+        #     error_improvement_reward
+        #     # mv_choice_reward
+        # )
         
-        return total_reward
+        return setpoint_bonus
 
     def step(self,action):
         """
@@ -441,6 +447,8 @@ class Simulator(object):
         #copy episode data to the episode array
         self.episode_array[self.transition_count] = self.episodedata[self.transition_count]
         self.episode_array[self.transition_count,self.MVindex] = action
+        # print(f"step: transition_count = {self.transition_count}, self.episode_array = {self.episode_array[self.transition_count]}\n")
+        
 
         # Predict the PVs if required
         if self.dt1 is not None:
@@ -527,18 +535,24 @@ class Simulator(object):
         if self.physics:
             self.physics_pv()
 
+        # print(f" step: self.transition_count, self.agent_lookback = {self.transition_count}, {self.agent_lookback}")
+        # print(f" step: self.transition_count, self.agent_lookback = {self.transition_count-self.agent_lookback+1}, {self.transition_count+1}")
+
         #get the new state to return
         state_ = self.episode_array[self.transition_count-self.agent_lookback+1:self.transition_count+1,self.agentIndex]
         state_ = state_.astype(np.float32)
+
+        # print(f"step: self.episodedata = {self.episodedata[self.transition_count-self.agent_lookback+1:self.transition_count+1,self.agentIndex]}\n")
+        # print(f"step: self.episode_array = {self.episode_array[self.transition_count-self.agent_lookback+1:self.transition_count+1,self.agentIndex]}\n")
 
         setpoint = self.episode_array[self.transition_count, self.SVindex]
         current_flow_rate = self.episode_array[self.transition_count, self.dt1_dependantVar]
         current_mv = self.episode_array[self.transition_count, self.MVindex]
         # Calculate reward
-        previous_mv = self.episode_array[self.transition_count - 1, self.MVindex]
+        previous_mv = self.episode_array[self.transition_count, self.MVindex]
         
         # Calculate previous error
-        previous_flow_rate = self.episode_array[self.transition_count - 1, self.dt1_dependantVar]
+        previous_flow_rate = self.episode_array[self.transition_count, self.dt1_dependantVar]
         previous_error = abs(setpoint - previous_flow_rate)
 
         error = abs(setpoint - current_flow_rate)
@@ -570,10 +584,10 @@ class Simulator(object):
                 done = True
                 termination_reason = "Failure: No improvement for too long"
 
-        # 3. Safety condition
-        if current_mv < self.mv_lower_limit or current_mv > self.mv_upper_limit:
-            done = True
-            termination_reason = "Safety: MV out of operational limits"
+        # # 3. Safety condition
+        # if current_mv < self.mv_lower_limit or current_mv > self.mv_upper_limit:
+        #     done = True
+        #     termination_reason = "Safety: MV out of operational limits"
 
         # 4. Time limit
         if self.transition_count >= self.episode_length:
@@ -581,7 +595,8 @@ class Simulator(object):
             termination_reason = "Time limit reached"
 
         raw_reward = self.calculate_reward(setpoint, current_flow_rate, current_mv, previous_mv, previous_error)
-        #adVance counter
+        # print(f"step: raw_reward = {raw_reward}, error = {error}, termination_reason = {termination_reason}")
+        # #adVance counter
         self.transition_count +=1 
         # Prepare info dict
         info = {

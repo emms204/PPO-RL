@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf    
 import tensorflow_probability as tfp
+tfd = tfp.distributions
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Lambda, Flatten
 from tensorflow.keras.optimizers import Adam
@@ -82,38 +83,52 @@ class ReplayBuffer:
         buff_std = df.std()
         return buff_min, buff_max, buff_mean, buff_std
 
+import tensorflow as tf
+import tensorflow_probability as tfp
 
 class ActorNetwork(tf.keras.Model):
-    def __init__(self, action_dim, hidden_dim):
+    def __init__(self, action_dim, hidden_dim, log_std_min=-20.0, log_std_max=2.0):
         super().__init__()
         self.flatten = Flatten()
-        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.mean_layer = tf.keras.layers.Dense(action_dim, activation='tanh')
-        self.log_std = tf.Variable(tf.zeros(action_dim), trainable=True)
+        self.fc1 = Dense(hidden_dim)
+        self.fc2 = Dense(hidden_dim//2)
+        self.fc3 = Dense(hidden_dim//4)
+        self.mean_layer = Dense(action_dim, activation='sigmoid')
+        self.log_std_layer = Dense(action_dim)
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
     
     def call(self, x):
         x = self.flatten(x)
         x = self.fc1(x)
-        x = self.fc2(x)
-        mean = self.mean_layer(x)
-        log_std = tf.clip_by_value(self.log_std, -20, 2)
-        log_std = tf.broadcast_to(log_std, tf.shape(mean))
-        return mean, log_std
+        x = self.fc2(tf.nn.relu(x))
+        x = self.fc3(tf.nn.relu(x))
+        mu = self.mean_layer(tf.nn.relu(x))
+        log_std = self.log_std_layer(x)
+        
+        log_std = tf.clip_by_value(log_std, self.log_std_min, self.log_std_max)
+        # std = tf.exp(log_std)
+        # covar = tf.square(std)
+        # covar = tf.linalg.diag(covar)
+        
+        return mu, log_std
 
 class ValueNetwork(tf.keras.Model):
     def __init__(self, hidden_dim):
         super().__init__()
         self.flatten = Flatten()
-        self.fc1 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(hidden_dim, activation='relu')
-        self.fc3 = tf.keras.layers.Dense(1)
+        self.fc1 = Dense(hidden_dim)
+        self.fc2 = Dense(hidden_dim//2, activation='relu')
+        self.fc3 = Dense(hidden_dim//4, activation='relu')
+        self.fc4 = Dense(1)
     
     def call(self, x):
         x = self.flatten(x)
         x = self.fc1(x)
         x = self.fc2(x)
-        return self.fc3(x)
+        x = self.fc3(x)
+        x = self.fc4(tf.nn.leaky_relu(x))
+        return x
 
 class PPOAgent:
     def __init__(self, 
@@ -159,21 +174,29 @@ class PPOAgent:
         self.actor = None
         self.critic = None
 
-    def build_actor(self, action_dim, hidden_dim):
+    def build_actor(self, action_dim, hidden_dim, action_std):
         self.actor = ActorNetwork(action_dim, hidden_dim)
         self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
-
-
+        # Create the covariance vector filled with the specified value
+        # self.cov_var = tf.fill([action_dim], action_std * action_std)
+        # # # Create the diagonal covariance matrix from the covariance vector
+        # self.cov_mat = tf.linalg.diag(self.cov_var)
+        
     def build_critic(self, hidden_dim):
         self.critic = ValueNetwork(hidden_dim)
         self.optimizer_critic = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
+        self.mse_loss = tf.keras.losses.MeanSquaredError()
 
     def select_action(self, state):
         state = tf.convert_to_tensor([state], dtype=tf.float32)
+        # action_mean = self.actor(state)
+        # cov_mat = torch.diag(self.action_var)
         mean, log_std = self.actor(state)
-        value = self.critic(state)
         std = tf.exp(log_std)
-        dist = tfp.distributions.Normal(mean, std)
+
+        value = self.critic(state)
+        # std = tf.exp(self.log_std)
+        dist = tfd.Normal(mean, std)
         action = dist.sample()
         action = tf.clip_by_value(action, 0, 1)
         return action.numpy()[0], dist.log_prob(action).numpy()[0], value.numpy()[0]
@@ -206,24 +229,37 @@ class PPOAgent:
             gae_t = delta + (gamma * lambda_ * gae_t)
             gaes.insert(0, gae_t)
         gaes = np.array(gaes)
-        return gaes    
+        return gaes  
     
-    @tf.function
+    # @tf.function
     def ppo_update(self, states, actions, old_log_probs, returns, advantages, epochs=20):
         advantages = tf.cast(advantages, dtype=tf.float32)
         old_log_probs = tf.cast(old_log_probs, dtype=tf.float32)
         returns = tf.cast(returns, dtype=tf.float32)    
-        for _ in range(epochs):
-            with tf.GradientTape() as tape_policy:
+        actor_l, value_l = [], []
+        for i in range(epochs):
+            with tf.GradientTape() as tape_policy, tf.GradientTape() as tape_value:
                 mean, log_std = self.actor(states)
+                values = self.critic(states)
                 std = tf.exp(log_std)
-                dist = tfp.distributions.Normal(mean, std)
+                # std = tf.exp(self.log_std)
+                dist = tfd.Normal(mean, std)
                 new_log_probs = tf.reduce_sum(dist.log_prob(actions), axis=-1, keepdims=True)
                 
                 ratio = tf.exp(new_log_probs - old_log_probs)
                 surr1 = ratio * advantages
                 surr2 = tf.clip_by_value(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
-                actor_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+                actor_loss = -tf.minimum(surr1, surr2)
+                if self.maximize_entropy:
+                    actor_loss = actor_loss - (self.entropy_coef * dist.entropy())
+                else:
+                    actor_loss = actor_loss + (self.entropy_coef * dist.entropy())
+                actor_loss = tf.reduce_mean(actor_loss)
+                actor_l.append(actor_loss)
+
+                value_loss = self.mse_loss(values, returns)
+                value_loss = tf.reduce_mean(value_loss)
+                value_l.append(value_loss)
             
             grads_actor = tape_policy.gradient(actor_loss, self.actor.trainable_variables)
 
@@ -231,19 +267,15 @@ class PPOAgent:
                 grads_actor = [tf.clip_by_norm(g, 1.0) for g in grads_actor]
             
             self.optimizer_actor.apply_gradients(zip(grads_actor, self.actor.trainable_variables))
-            
-            with tf.GradientTape() as tape_value:
-                value_pred = self.critic(states)
-                value_loss = tf.reduce_mean(tf.square(returns - value_pred))
-            
+
             grads_critic = tape_value.gradient(value_loss, self.critic.trainable_variables)
 
             if self.clip_value_grads:
                 grads_critic = [tf.clip_by_norm(g, 1.0) for g in grads_critic]
 
             self.optimizer_critic.apply_gradients(zip(grads_critic, self.critic.trainable_variables))
-
-        return actor_loss, value_loss
+             
+        return np.mean(actor_l), np.mean(value_l)
         
             
     

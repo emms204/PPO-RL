@@ -2,8 +2,6 @@
     "variables": {
         "dependantVar": 3,
         "independantVars": [
-            1,
-            2,
             3,
             5,
             6,
@@ -19,7 +17,7 @@
     "gamma": 0.99,
     "lambda": 0.95,
     "clip_epsilon": 0.2,
-    "entropy_coef": 0.01,
+    "entropy_coef": 0.001,
     "critic_coef": 0.5,
     "svNoise": 0.05,
     "episode_length": 300,
