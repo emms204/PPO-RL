@@ -190,7 +190,7 @@ def rollout(sim: Simulator, agent: PPOAgent) -> Tuple[Dict[str, np.ndarray], flo
     experience = {k:np.array(v) for k, v in experience.items()}
     return experience, eps_reward
 
-NUM_EPISODES = 500
+NUM_EPISODES = 2000
 normalize_returns = False
 normalize_gaes = False
 
@@ -203,7 +203,7 @@ for episode in tqdm(range(0, NUM_EPISODES)):
     data, episode_reward = rollout(sim, agent)
     # for k, v in data.items():
     #    print(k, v.shape)
-    data["states"] = (data["states"] - data["states"].mean()) / (data["states"].std() + 1e-5)
+    data["states"] = (data["states"] - data["states"].mean()) / (data["states"].std())
     data["returns"] = agent.discount_reward(data["rewards"], GAMMA)
     # data["returns"] = (data["returns"] - data["returns"].mean()) / (data["returns"].std() + 1e-5)
     # data["gaes"] = (data["gaes"] - data["gaes"].mean()) / (data["gaes"]) + 1e-8
@@ -216,7 +216,7 @@ for episode in tqdm(range(0, NUM_EPISODES)):
                        data["dones"], data["states"][1:], data["log_probs"])
 
     act_loss, crit_loss = agent.ppo_update(data["states"], data["actions"], data["log_probs"], data["returns"], 
-                                           data["gaes"], epochs=10)
+                                           data["gaes"], epochs=30)
 
     train_performance["rewards"].append(episode_reward)
 
@@ -229,6 +229,7 @@ for episode in tqdm(range(0, NUM_EPISODES)):
 
     if (episode + 1) % 10 == 0:
         buff.saveEpisodes(MODEL_DIR + 'replaybuffer.csv')
+        agent.save_policy(MODEL_DIR + CONTROLLER_NAME + f"_episode{episode+1}")
 
     print(f'best total reward for episode {episode+1}: {episode_reward:.3f}, Actor Loss: {act_loss:.3f}, Critic Loss: {crit_loss:.3f}')
 
